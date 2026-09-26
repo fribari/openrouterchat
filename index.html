@@ -43,6 +43,22 @@ button { cursor:pointer; }
 .controls { display:flex; gap:8px; padding:8px 12px; background:var(--panel); border-bottom:1px solid var(--line); }
 .controls select { flex:1; min-width:0; height:40px; border:1px solid var(--line); border-radius:10px;
   background:var(--panel); padding:0 10px; font-size:14px; }
+.model-btn { flex:1; min-width:0; height:40px; display:flex; align-items:center; justify-content:space-between; gap:8px;
+  border:1px solid var(--line); border-radius:10px; background:var(--panel); padding:0 12px; font-size:14px; text-align:left; }
+.model-btn span:first-child { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.model-dlg { width:min(560px, calc(100vw - 16px)); max-height:calc(100dvh - 40px); margin-top:calc(12px + env(safe-area-inset-top, 0px)); }
+.picker { display:flex; flex-direction:column; max-height:calc(100dvh - 40px); }
+.picker-head { display:flex; gap:8px; padding:12px 12px 6px; }
+.picker-head input { flex:1; min-width:0; border:1px solid var(--line); border-radius:10px; padding:10px; background:var(--bg); font-size:16px; }
+.free-only { display:flex; align-items:center; gap:8px; padding:4px 14px 8px; font-size:14px; color:var(--muted); }
+.model-list { overflow-y:auto; -webkit-overflow-scrolling:touch; padding:0 6px 10px; border-top:1px solid var(--line); }
+.model-group { font-size:12px; color:var(--muted); padding:10px 8px 4px; }
+.model-opt { display:block; width:100%; border:0; background:none; text-align:left; padding:9px 8px; border-radius:9px; }
+.model-opt:active, .model-opt.sel { background:var(--head); }
+.model-opt .mname { font-size:14px; }
+.model-opt .mid { font-size:12px; color:var(--muted); overflow-wrap:anywhere; }
+.model-opt .free { font-size:11px; font-weight:600; color:#15803d; margin-left:6px; }
+.model-none { padding:14px 8px; color:var(--muted); font-size:14px; }
 .small-btn { height:40px; min-width:42px; border:1px solid var(--line); border-radius:10px; background:var(--panel); font-size:18px; }
 
 .messages { flex:1; min-height:0; overflow-y:auto; -webkit-overflow-scrolling:touch; padding:16px 12px 8px; }
@@ -126,7 +142,7 @@ dialog::backdrop { background:rgba(0,0,0,.35); }
   </header>
 
   <div class="controls">
-    <select id="modelSelect" aria-label="Model"></select>
+    <button class="model-btn" id="modelBtn" type="button" aria-haspopup="dialog"><span id="modelLabel">Choose a model</span><span aria-hidden="true">⌄</span></button>
     <button class="small-btn" id="refreshModels" aria-label="Reload model list">↻</button>
   </div>
 
@@ -153,6 +169,17 @@ dialog::backdrop { background:rgba(0,0,0,.35); }
   </div>
 </aside>
 <div class="backdrop" id="backdrop"></div>
+
+<dialog id="modelDlg" class="model-dlg">
+  <div class="picker">
+    <div class="picker-head">
+      <input id="modelSearch" type="search" placeholder="Search or type a model ID" autocomplete="off" autocapitalize="off" spellcheck="false" enterkeyhint="done">
+      <button class="btn" type="button" id="modelClose">Close</button>
+    </div>
+    <label class="free-only"><input type="checkbox" id="freeOnly"> Free models only</label>
+    <div class="model-list" id="modelList"></div>
+  </div>
+</dialog>
 
 <dialog id="settings">
   <form class="dlg" method="dialog" id="settingsForm">
@@ -192,7 +219,8 @@ let currentId = store.get("current", null);
 let busy = false, controller = null;
 
 const $ = id => document.getElementById(id);
-const messagesEl = $("messages"), input = $("input"), modelSelect = $("modelSelect");
+const messagesEl = $("messages"), input = $("input");
+let currentModel = store.get("model", "");
 const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
 const apiKey = () => (store.get("key", "") || "").trim();
 const sysPrompt = () => store.get("sys", DEFAULT_SYS);
@@ -381,22 +409,71 @@ function renderChatList() {
 const scrollBottom = () => { messagesEl.scrollTop = messagesEl.scrollHeight; };
 
 // ---------------------------------------------------------------- models
-function setModel(id) {
+function modelName(id) { const m = models.find(x => x.id === id); return m ? m.name : id; }
+function setModel(id, remember = false) {
   if (!id) return;
-  if (![...modelSelect.options].some(o => o.value === id)) {
-    const o = document.createElement("option"); o.value = id; o.textContent = id; modelSelect.prepend(o);
+  currentModel = id;
+  $("modelLabel").textContent = modelName(id);
+  store.set("model", id);
+  if (remember) {
+    const recent = [id, ...store.get("recentModels", []).filter(x => x !== id)].slice(0, 6);
+    store.set("recentModels", recent);
   }
-  modelSelect.value = id;
 }
 function fillModels() {
-  const keep = modelSelect.value || store.get("model", "");
-  modelSelect.innerHTML = "";
-  if (!models.length) { modelSelect.innerHTML = `<option value="">No models loaded - tap ↻</option>`; return; }
-  for (const m of models) {
-    const o = document.createElement("option");
-    o.value = m.id; o.textContent = m.name + (m.free ? " · FREE" : ""); modelSelect.appendChild(o);
+  if (currentModel) setModel(currentModel);
+  else if (models.length) setModel((models.find(m => m.free) || models[0]).id);
+  else $("modelLabel").textContent = "Choose a model";
+}
+
+function modelRow(m) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "model-opt" + (m.id === currentModel ? " sel" : "");
+  b.innerHTML = `<div class="mname">${esc(m.name)}${m.free ? '<span class="free">FREE</span>' : ""}</div><div class="mid">${esc(m.id)}</div>`;
+  b.onclick = () => pickModel(m.id);
+  return b;
+}
+function renderModelList() {
+  const list = $("modelList"), q = $("modelSearch").value.trim().toLowerCase(), freeOnly = $("freeOnly").checked;
+  list.innerHTML = "";
+  const words = q.split(/\s+/).filter(Boolean);
+  const pool = models.filter(m => !freeOnly || m.free);
+  const hits = pool.filter(m => { const hay = (m.name + " " + m.id).toLowerCase(); return words.every(w => hay.includes(w)); });
+
+  // Typed a full model ID that isn't in the list -> offer to use it anyway
+  const typed = $("modelSearch").value.trim();
+  if (typed.includes("/") && !models.some(m => m.id === typed)) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "model-opt";
+    b.innerHTML = `<div class="mname">Use model ID “${esc(typed)}”</div><div class="mid">Not in the loaded list - sent to OpenRouter as typed</div>`;
+    b.onclick = () => pickModel(typed);
+    list.appendChild(b);
   }
-  setModel(keep || models[0].id);
+
+  if (!words.length) {
+    const recent = store.get("recentModels", []).map(id => models.find(m => m.id === id) || { id, name:id, free:false })
+                   .filter(m => !freeOnly || m.free);
+    if (recent.length) {
+      list.insertAdjacentHTML("beforeend", `<div class="model-group">Recently used</div>`);
+      recent.forEach(m => list.appendChild(modelRow(m)));
+      list.insertAdjacentHTML("beforeend", `<div class="model-group">All models (${pool.length})</div>`);
+    }
+  }
+  if (!models.length) { list.insertAdjacentHTML("beforeend", `<div class="model-none">Model list not loaded. Tap ↻ next to the model button, or type a full model ID like <b>openai/gpt-4o-mini</b>.</div>`); return; }
+  if (!hits.length && !list.children.length) { list.insertAdjacentHTML("beforeend", `<div class="model-none">No models match “${esc(q)}”.</div>`); return; }
+  const frag = document.createDocumentFragment();
+  hits.slice(0, 300).forEach(m => frag.appendChild(modelRow(m)));
+  list.appendChild(frag);
+}
+function openModelPicker() {
+  $("modelSearch").value = ""; $("freeOnly").checked = store.get("freeOnly", false);
+  renderModelList(); $("modelDlg").showModal(); $("modelList").scrollTop = 0;
+  if (!touch) $("modelSearch").focus();
+}
+function pickModel(id) {
+  setModel(id, true);
+  const c = current(); if (c) { c.model = id; saveChats(); renderChatList(); }
+  $("modelDlg").close();
 }
 async function loadModels() {
   $("refreshModels").disabled = true;
@@ -412,14 +489,10 @@ async function loadModels() {
     store.set("models", models);
     fillModels();
   } catch (e) {
-    if (!models.length) modelSelect.innerHTML = `<option value="">Could not load models - tap ↻</option>`;
+    if (!models.length) $("modelLabel").textContent = "Could not load models - tap ↻";
     console.warn("Model list failed:", e);
   } finally { $("refreshModels").disabled = false; }
 }
-modelSelect.onchange = () => {
-  store.set("model", modelSelect.value);
-  const c = current(); if (c) { c.model = modelSelect.value; saveChats(); renderChatList(); }
-};
 
 // ---------------------------------------------------------------- chatting
 function newChat() {
@@ -439,8 +512,8 @@ async function send() {
   const text = input.value.trim();
   if (!text) return;
   if (!apiKey()) { openSettings(); return; }
-  const model = modelSelect.value;
-  if (!model) { alert("Choose a model first (tap ↻ to load the list)."); return; }
+  const model = currentModel;
+  if (!model) { openModelPicker(); return; }
 
   let c = current();
   if (!c) {
@@ -572,6 +645,14 @@ $("newBtn").onclick = newChat;
 $("sideNewBtn").onclick = newChat;
 $("settingsBtn").onclick = openSettings;
 $("refreshModels").onclick = loadModels;
+$("modelBtn").onclick = openModelPicker;
+$("modelClose").onclick = () => $("modelDlg").close();
+$("modelSearch").addEventListener("input", renderModelList);
+$("modelSearch").addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); const first = $("modelList").querySelector(".model-opt"); if (first) first.click(); }
+});
+$("freeOnly").onchange = () => { store.set("freeOnly", $("freeOnly").checked); renderModelList(); };
+$("modelDlg").addEventListener("click", e => { if (e.target === $("modelDlg")) $("modelDlg").close(); });
 
 fillModels();
 renderChat();
