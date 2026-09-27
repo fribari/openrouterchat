@@ -9,7 +9,7 @@
 <meta name="apple-mobile-web-app-title" content="OR Chat">
 <meta name="theme-color" content="#f5f6f8" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#15181d" media="(prefers-color-scheme: dark)">
-<title>OpenRouter Chat</title>
+<title>OpenRouter + Local Chat</title>
 <style>
 :root {
   --bg:#f5f6f8; --panel:#ffffff; --text:#1b2330; --muted:#6b7280; --line:#e3e6eb;
@@ -130,6 +130,17 @@ dialog::backdrop { background:rgba(0,0,0,.35); }
 .status { font-size:13px; min-height:1.2em; margin:0; }
 .status.bad { color:var(--danger); }
 
+.local-box { border:1px solid var(--line); border-radius:12px; padding:12px; margin:0; display:grid; gap:10px; }
+.local-box legend { font-size:14px; font-weight:600; padding:0 4px; }
+.dlg label.check { display:flex; align-items:center; gap:8px; font-weight:400; }
+.dlg label.check input { width:20px; height:20px; }
+.dlg code { font-size:12px; background:var(--bg); padding:1px 5px; border-radius:5px; overflow-wrap:anywhere; }
+.model-opt .local { font-size:11px; font-weight:600; color:#1d4ed8; margin-left:6px; }
+@media (prefers-color-scheme: dark) { .model-opt .local { color:#93b4ff; } }
+.think { margin:2px 0 8px; border-left:3px solid var(--line); padding:2px 0 2px 10px; color:var(--muted); font-size:13px; }
+.think summary { cursor:pointer; font-weight:600; }
+.think-text { white-space:pre-wrap; max-height:220px; overflow:auto; margin-top:4px; }
+
 @media (prefers-reduced-motion: reduce) { .sidebar { transition:none; } }
 </style>
 </head>
@@ -187,7 +198,17 @@ dialog::backdrop { background:rgba(0,0,0,.35); }
     <label>OpenRouter API key
       <input id="keyInput" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="sk-or-v1-…">
     </label>
-    <p class="note">The key is stored only in this browser on this device and is sent only to openrouter.ai.</p>
+    <p class="note">The key is stored only in this browser on this device and is sent only to openrouter.ai. Not needed for local models.</p>
+    <fieldset class="local-box">
+      <legend>Local models (offline)</legend>
+      <label class="check"><input type="checkbox" id="localOnInput"> Use models from Ollama on this computer</label>
+      <label>Local server address
+        <input id="localBaseInput" type="url" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="http://localhost:11434/v1">
+      </label>
+      <label class="check"><input type="checkbox" id="localThinkInput"> Let local models "think" first (slower; off = direct answers)</label>
+      <p class="note">Works when this page is open on the PC that runs Ollama. Opened from <code>localhost</code> it works as is; opened from another address, Ollama must allow <code id="originHint"></code> in its <code>OLLAMA_ORIGINS</code> setting.</p>
+      <div class="row" style="justify-content:flex-start"><button class="btn" type="button" id="testLocalBtn">Test local connection</button></div>
+    </fieldset>
     <label>Instructions for the model
       <textarea id="sysInput"></textarea>
     </label>
@@ -214,7 +235,10 @@ const store = {
   }
 };
 let chats = store.get("chats", []);        // [{id,title,model,updated,messages:[{role,content}]}]
-let models = store.get("models", []);
+let models = store.get("models", []);           // OpenRouter models
+let localModels = store.get("localModels", []); // Ollama models, ids prefixed with "local:"
+const LOCAL_PREFIX = "local:";
+const DEFAULT_LOCAL_BASE = "http://localhost:11434/v1";
 let currentId = store.get("current", null);
 let busy = false, controller = null;
 
@@ -225,6 +249,14 @@ const esc = s => String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">"
 const apiKey = () => (store.get("key", "") || "").trim();
 const sysPrompt = () => store.get("sys", DEFAULT_SYS);
 const current = () => chats.find(c => c.id === currentId) || null;
+const localOn = () => store.get("localOn", false);
+const localBase = () => (store.get("localBase", DEFAULT_LOCAL_BASE) || DEFAULT_LOCAL_BASE).trim().replace(/\/+$/, "");
+const isLocal = id => String(id || "").startsWith(LOCAL_PREFIX);
+const localThink = () => store.get("localThink", false);
+const localRoot = () => localBase().replace(/\/v1$/, "");
+const allModels = () => [...(localOn() ? localModels : []), ...models];
+const LOCAL_HELP = () => `Could not reach Ollama at ${localBase()}. Check that Ollama is running on this computer` +
+  (/^https?:\/\/(localhost|127\.0\.0\.1)(:|$)/.test(location.origin) ? "." : `, and that OLLAMA_ORIGINS allows ${location.origin} (see Settings).`);
 function saveChats() { store.set("chats", chats); store.set("current", currentId); }
 
 // ---------------------------------------------------------------- code blocks -> files
@@ -368,10 +400,10 @@ function addMessage(role, content) {
   return bubble;
 }
 function renderEmpty() {
-  if (!apiKey()) {
+  if (!apiKey() && !localOn()) {
     messagesEl.innerHTML = `<div class="empty"><h1>OpenRouter Chat</h1>
-      <p>Add your OpenRouter API key to start chatting. It stays on this device.</p>
-      <button class="primary" type="button" id="emptyKeyBtn">Add API key</button></div>`;
+      <p>Add your OpenRouter API key, or turn on local models (Ollama), to start chatting. Everything stays on this device.</p>
+      <button class="primary" type="button" id="emptyKeyBtn">Open settings</button></div>`;
     $("emptyKeyBtn").onclick = openSettings;
   } else {
     messagesEl.innerHTML = `<div class="empty"><h1>OpenRouter Chat</h1><p>Pick a model and send a message.</p></div>`;
@@ -409,11 +441,11 @@ function renderChatList() {
 const scrollBottom = () => { messagesEl.scrollTop = messagesEl.scrollHeight; };
 
 // ---------------------------------------------------------------- models
-function modelName(id) { const m = models.find(x => x.id === id); return m ? m.name : id; }
+function modelName(id) { const m = allModels().find(x => x.id === id) || localModels.find(x => x.id === id); return m ? m.name : (isLocal(id) ? id.slice(LOCAL_PREFIX.length) + " (local)" : id); }
 function setModel(id, remember = false) {
   if (!id) return;
   currentModel = id;
-  $("modelLabel").textContent = modelName(id);
+  $("modelLabel").textContent = modelName(id) + (isLocal(id) ? " · local" : "");
   store.set("model", id);
   if (remember) {
     const recent = [id, ...store.get("recentModels", []).filter(x => x !== id)].slice(0, 6);
@@ -422,14 +454,16 @@ function setModel(id, remember = false) {
 }
 function fillModels() {
   if (currentModel) setModel(currentModel);
-  else if (models.length) setModel((models.find(m => m.free) || models[0]).id);
+  else if (allModels().length) setModel((allModels().find(m => m.free) || allModels()[0]).id);
   else $("modelLabel").textContent = "Choose a model";
 }
 
 function modelRow(m) {
   const b = document.createElement("button");
   b.type = "button"; b.className = "model-opt" + (m.id === currentModel ? " sel" : "");
-  b.innerHTML = `<div class="mname">${esc(m.name)}${m.free ? '<span class="free">FREE</span>' : ""}</div><div class="mid">${esc(m.id)}</div>`;
+  const badge = m.local ? '<span class="local">LOCAL</span>' : m.free ? '<span class="free">FREE</span>' : "";
+  const idText = m.local ? "Ollama · " + m.id.slice(LOCAL_PREFIX.length) : m.id;
+  b.innerHTML = `<div class="mname">${esc(m.name)}${badge}</div><div class="mid">${esc(idText)}</div>`;
   b.onclick = () => pickModel(m.id);
   return b;
 }
@@ -437,21 +471,21 @@ function renderModelList() {
   const list = $("modelList"), q = $("modelSearch").value.trim().toLowerCase(), freeOnly = $("freeOnly").checked;
   list.innerHTML = "";
   const words = q.split(/\s+/).filter(Boolean);
-  const pool = models.filter(m => !freeOnly || m.free);
+  const pool = allModels().filter(m => !freeOnly || m.free);
   const hits = pool.filter(m => { const hay = (m.name + " " + m.id).toLowerCase(); return words.every(w => hay.includes(w)); });
 
   // Typed a full model ID that isn't in the list -> offer to use it anyway
   const typed = $("modelSearch").value.trim();
-  if (typed.includes("/") && !models.some(m => m.id === typed)) {
+  if ((typed.includes("/") || isLocal(typed)) && !allModels().some(m => m.id === typed)) {
     const b = document.createElement("button");
     b.type = "button"; b.className = "model-opt";
-    b.innerHTML = `<div class="mname">Use model ID “${esc(typed)}”</div><div class="mid">Not in the loaded list - sent to OpenRouter as typed</div>`;
+    b.innerHTML = `<div class="mname">Use model ID “${esc(typed)}”</div><div class="mid">${isLocal(typed) ? "Sent to Ollama as typed" : "Not in the loaded list - sent to OpenRouter as typed"}</div>`;
     b.onclick = () => pickModel(typed);
     list.appendChild(b);
   }
 
   if (!words.length) {
-    const recent = store.get("recentModels", []).map(id => models.find(m => m.id === id) || { id, name:id, free:false })
+    const recent = store.get("recentModels", []).map(id => allModels().find(m => m.id === id) || { id, name:modelName(id), free:isLocal(id), local:isLocal(id) })
                    .filter(m => !freeOnly || m.free);
     if (recent.length) {
       list.insertAdjacentHTML("beforeend", `<div class="model-group">Recently used</div>`);
@@ -459,10 +493,11 @@ function renderModelList() {
       list.insertAdjacentHTML("beforeend", `<div class="model-group">All models (${pool.length})</div>`);
     }
   }
-  if (!models.length) { list.insertAdjacentHTML("beforeend", `<div class="model-none">Model list not loaded. Tap ↻ next to the model button, or type a full model ID like <b>openai/gpt-4o-mini</b>.</div>`); return; }
+  if (localOn() && !localModels.length && !words.length) list.insertAdjacentHTML("beforeend", `<div class="model-none">No local models found. Start Ollama, then tap ↻ (or use Settings → Test local connection).</div>`);
+  if (!allModels().length) { list.insertAdjacentHTML("beforeend", `<div class="model-none">Model list not loaded. Tap ↻ next to the model button, or type a full model ID like <b>openai/gpt-4o-mini</b>.</div>`); return; }
   if (!hits.length && !list.children.length) { list.insertAdjacentHTML("beforeend", `<div class="model-none">No models match “${esc(q)}”.</div>`); return; }
   const frag = document.createDocumentFragment();
-  hits.slice(0, 300).forEach(m => frag.appendChild(modelRow(m)));
+  hits.slice(0, 2000).forEach(m => frag.appendChild(modelRow(m)));
   list.appendChild(frag);
 }
 function openModelPicker() {
@@ -475,8 +510,21 @@ function pickModel(id) {
   const c = current(); if (c) { c.model = id; saveChats(); renderChatList(); }
   $("modelDlg").close();
 }
+async function loadLocalModels() {
+  if (!localOn()) return;
+  try {
+    const r = await fetch(`${localBase()}/models`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = (await r.json()).data || [];
+    localModels = data.map(m => ({ id: LOCAL_PREFIX + m.id, name: m.id, free:true, local:true }))
+                      .sort((a, b) => a.name.localeCompare(b.name));
+    store.set("localModels", localModels);
+  } catch (e) { console.warn("Local model list failed:", e); }
+}
 async function loadModels() {
   $("refreshModels").disabled = true;
+  await loadLocalModels();
+  fillModels();
   try {
     const r = await fetch(`${API}/models`);
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -492,6 +540,12 @@ async function loadModels() {
     if (!models.length) $("modelLabel").textContent = "Could not load models - tap ↻";
     console.warn("Model list failed:", e);
   } finally { $("refreshModels").disabled = false; }
+}
+
+// Some models put their reasoning inline as <think>...</think>
+function splitThink(text) {
+  const m = text.match(/^\s*<think>([\s\S]*?)(<\/think>|$)([\s\S]*)$/);
+  return m ? { think: m[1], answer: m[3] || "" } : { think: "", answer: text };
 }
 
 // ---------------------------------------------------------------- chatting
@@ -511,9 +565,10 @@ async function send() {
   if (busy) { controller && controller.abort(); return; }
   const text = input.value.trim();
   if (!text) return;
-  if (!apiKey()) { openSettings(); return; }
   const model = currentModel;
   if (!model) { openModelPicker(); return; }
+  const local = isLocal(model);
+  if (!local && !apiKey()) { openSettings(); return; }
 
   let c = current();
   if (!c) {
@@ -528,23 +583,58 @@ async function send() {
   input.value = ""; resizeInput();
   addMessage("user", text);
   const bubble = addMessage("assistant", "");
-  bubble.innerHTML = `<span class="typing">…</span>`;
+  bubble.innerHTML = `<span class="typing">${local ? "Waiting for the local model (the first reply can take a minute while it loads)…" : "…"}</span>`;
   scrollBottom();
 
   busy = true; controller = new AbortController();
   $("sendBtn").textContent = "■"; $("sendBtn").setAttribute("aria-label", "Stop");
 
   const messages = c.messages.map(m => ({ role:m.role, content:m.content }));
-  const sys = (sysPrompt() || "").trim();
-  if (sys) messages.unshift({ role:"system", content:sys });
+  const now = new Date();
+  const clock = `Current local date and time: ${now.toLocaleString(undefined, { weekday:"long", year:"numeric", month:"long", day:"numeric", hour:"2-digit", minute:"2-digit" })} (${Intl.DateTimeFormat().resolvedOptions().timeZone}).`;
+  const sys = [clock, (sysPrompt() || "").trim()].filter(Boolean).join("\n");
+  messages.unshift({ role:"system", content:sys });
+  const nativeLocal = local && !localThink();   // Ollama native API lets us switch thinking off
 
-  let answer = "";
+  let answer = "", thinking = "", thinkEl = null, ansEl = null;
+  const showLive = () => {
+    const parts = splitThink(answer), thoughts = (thinking + parts.think).trim();
+    if (!ansEl) {
+      bubble.classList.remove("rich"); bubble.innerHTML = "";
+      thinkEl = document.createElement("details"); thinkEl.className = "think";
+      thinkEl.innerHTML = `<summary>Thinking…</summary><div class="think-text"></div>`;
+      ansEl = document.createElement("div"); ansEl.className = "text-part";
+      bubble.append(thinkEl, ansEl);
+    }
+    thinkEl.hidden = !thoughts;
+    const tt = thinkEl.querySelector(".think-text"); tt.textContent = thoughts; tt.scrollTop = tt.scrollHeight;
+    thinkEl.querySelector("summary").textContent = parts.answer.trim() ? "Thought process"
+      : `Thinking… (${thoughts.split(/\s+/).filter(Boolean).length} words - tap to view)`;
+    ansEl.textContent = parts.answer;
+    scrollBottom();
+  };
   try {
-    const r = await fetch(`${API}/chat/completions`, {
-      method:"POST", signal: controller.signal,
-      headers:{ "Authorization":`Bearer ${apiKey()}`, "Content-Type":"application/json" },
-      body: JSON.stringify({ model, messages, stream:true })
-    });
+    const headers = { "Content-Type":"application/json" };
+    if (!local) headers.Authorization = `Bearer ${apiKey()}`;
+    const modelId = local ? model.slice(LOCAL_PREFIX.length) : model;
+    let r;
+    if (nativeLocal) {
+      const nativeUrl = `${localRoot()}/api/chat`;
+      const req = extra => fetch(nativeUrl, { method:"POST", signal: controller.signal, headers,
+        body: JSON.stringify({ model:modelId, messages, stream:true, ...extra }) });
+      r = await req({ think:false });
+      if (!r.ok) {
+        const err = await r.json().catch(() => null);
+        // models without a thinking switch reject the "think" option -> retry without it
+        if (r.status === 400 && /think/i.test(JSON.stringify(err || ""))) r = await req({});
+        else throw new Error(errorText(err, r.status));
+      }
+    } else {
+      r = await fetch(local ? `${localBase()}/chat/completions` : `${API}/chat/completions`, {
+        method:"POST", signal: controller.signal, headers,
+        body: JSON.stringify({ model:modelId, messages, stream:true })
+      });
+    }
     if (!r.ok) throw new Error(errorText(await r.json().catch(() => null), r.status));
 
     const reader = r.body.getReader(), decoder = new TextDecoder();
@@ -555,28 +645,48 @@ async function send() {
       buffer += decoder.decode(value, { stream:true });
       const lines = buffer.split("\n"); buffer = lines.pop();
       for (const line of lines) {
+        if (nativeLocal) {                                    // Ollama native: one JSON object per line
+          if (!line.trim()) continue;
+          let obj; try { obj = JSON.parse(line); } catch { continue; }
+          if (obj.error) throw new Error(typeof obj.error === "string" ? obj.error : JSON.stringify(obj.error));
+          const m = obj.message || {};
+          if (m.thinking) thinking += m.thinking;
+          if (m.content) answer += m.content;
+          if (m.thinking || m.content) showLive();
+          if (obj.done) break outer;
+          continue;
+        }
         if (!line.startsWith("data: ")) continue;             // skips ": OPENROUTER PROCESSING" keep-alives
         const raw = line.slice(6).trim();
         if (raw === "[DONE]") break outer;
         let obj; try { obj = JSON.parse(raw); } catch { continue; }
         if (obj.error) throw new Error(errorText(obj, obj.error.code || ""));
-        const delta = obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content;
-        if (delta) {
-          answer += delta;
-          bubble.classList.remove("rich"); bubble.textContent = answer;
-          scrollBottom();
-        }
+        const d = (obj.choices && obj.choices[0] && obj.choices[0].delta) || {};
+        const think = d.reasoning || d.reasoning_content || d.thinking;
+        if (think) thinking += think;
+        if (d.content) answer += d.content;
+        if (think || d.content) showLive();
       }
     }
   } catch (e) {
     if (e.name !== "AbortError") {
-      if (!answer) { bubble.textContent = "Error: " + (e.message === "Failed to fetch" ? "no connection to openrouter.ai" : e.message); bubble.classList.add("error"); }
-      else answer += `\n\n[Stopped: ${e.message}]`;
+      const offline = e instanceof TypeError;   // network / CORS failure
+      const msg = offline ? (local ? LOCAL_HELP() : "no connection to openrouter.ai") : e.message;
+      if (!answer) { bubble.classList.remove("rich"); bubble.textContent = "Error: " + msg; bubble.classList.add("error"); }
+      else answer += `\n\n[Stopped: ${msg}]`;
     }
   } finally {
+    const parts = splitThink(answer), thoughts = (thinking + parts.think).trim();
+    answer = parts.answer.trim() ? parts.answer.replace(/^\s+/, "") : "";
     if (answer) {
       c.messages.push({ role:"assistant", content:answer }); c.updated = Date.now(); saveChats();
       renderAssistant(bubble, answer);
+      if (thoughts) {
+        const det = document.createElement("details"); det.className = "think";
+        det.innerHTML = `<summary>Thought process</summary><div class="think-text"></div>`;
+        det.querySelector(".think-text").textContent = thoughts;
+        bubble.prepend(det);
+      }
     } else if (!bubble.classList.contains("error")) {
       bubble.textContent = "(no reply)";
     }
@@ -589,13 +699,19 @@ async function send() {
 // ---------------------------------------------------------------- settings
 function openSettings() {
   $("keyInput").value = apiKey(); $("sysInput").value = sysPrompt();
+  $("localOnInput").checked = localOn(); $("localBaseInput").value = localBase(); $("localThinkInput").checked = localThink();
+  $("originHint").textContent = location.origin && location.origin !== "null" ? location.origin : "this page";
   $("settingsStatus").textContent = ""; $("settingsStatus").className = "status";
   closeSidebar(); $("settings").showModal();
 }
 $("saveSettings").onclick = () => {
   store.set("key", $("keyInput").value.trim().replace(/^["']|["']$/g, ""));
   store.set("sys", $("sysInput").value);
+  store.set("localOn", $("localOnInput").checked);
+  store.set("localThink", $("localThinkInput").checked);
+  store.set("localBase", ($("localBaseInput").value.trim() || DEFAULT_LOCAL_BASE).replace(/\/+$/, ""));
   $("settings").close();
+  loadModels();
   if (!current() || !current().messages.length) renderEmpty();
 };
 $("testKeyBtn").onclick = async () => {
@@ -606,6 +722,23 @@ $("testKeyBtn").onclick = async () => {
     if (r.ok) { st.textContent = "Key works ✓"; }
     else { st.className = "status bad"; st.textContent = errorText(await r.json().catch(() => null), r.status); }
   } catch { st.className = "status bad"; st.textContent = "Could not reach openrouter.ai."; }
+};
+
+$("testLocalBtn").onclick = async () => {
+  const st = $("settingsStatus"), base = ($("localBaseInput").value.trim() || DEFAULT_LOCAL_BASE).replace(/\/+$/, "");
+  st.className = "status"; st.textContent = "Connecting…";
+  try {
+    const r = await fetch(`${base}/models`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const ids = ((await r.json()).data || []).map(m => m.id);
+    st.textContent = ids.length ? `Connected ✓ ${ids.length} model(s): ${ids.slice(0, 5).join(", ")}${ids.length > 5 ? "…" : ""}`
+                                : "Connected ✓ but no models installed (run: ollama pull <model>)";
+  } catch (e) {
+    st.className = "status bad";
+    st.textContent = e instanceof TypeError
+      ? `Could not reach ${base}. Is Ollama running?` + (/^https?:\/\/(localhost|127\.0\.0\.1)(:|$)/.test(location.origin) ? "" : ` Also allow ${location.origin} in OLLAMA_ORIGINS.`)
+      : `Error: ${e.message}`;
+  }
 };
 
 // ---------------------------------------------------------------- backup
